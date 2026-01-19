@@ -3,13 +3,11 @@ import {
   Room,
   RoomEvent,
   Track,
-  Participant,
   RemoteParticipant,
   LocalParticipant,
-  RemoteTrackPublication,
-  LocalTrackPublication,
   ConnectionState,
-  TrackPublication,
+  RemoteTrack,
+  RemoteTrackPublication,
 } from 'livekit-client';
 import { supabase } from '@/integrations/supabase/client';
 
@@ -33,11 +31,31 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   
   const roomRef = useRef<Room | null>(null);
+  const audioContainerRef = useRef<HTMLDivElement | null>(null);
+  const attachedTracksRef = useRef<Map<string, HTMLMediaElement>>(new Map());
+
+  // Create a hidden container for audio elements
+  useEffect(() => {
+    if (!audioContainerRef.current) {
+      const container = document.createElement('div');
+      container.id = 'livekit-audio-container';
+      container.style.display = 'none';
+      document.body.appendChild(container);
+      audioContainerRef.current = container;
+    }
+    
+    return () => {
+      if (audioContainerRef.current) {
+        audioContainerRef.current.remove();
+        audioContainerRef.current = null;
+      }
+    };
+  }, []);
 
   const updateParticipants = useCallback(() => {
     if (roomRef.current) {
       const remotes = Array.from(roomRef.current.remoteParticipants.values());
-      setParticipants(remotes);
+      setParticipants([...remotes]); // Create new array to trigger re-render
       setLocalParticipant(roomRef.current.localParticipant);
     }
   }, []);
@@ -75,6 +93,65 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     }
   }, [findScreenTrack]);
 
+  // Attach audio track manually for proper playback
+  const attachAudioTrack = useCallback((track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
+    if (track.kind !== Track.Kind.Audio) return;
+    
+    const trackId = `${participant.identity}-${publication.trackSid}`;
+    
+    // Don't attach if already attached
+    if (attachedTracksRef.current.has(trackId)) {
+      console.log('Audio track already attached:', trackId);
+      return;
+    }
+    
+    console.log('Attaching audio track:', trackId, 'from', participant.identity);
+    
+    const audioElement = track.attach() as HTMLAudioElement;
+    audioElement.autoplay = true;
+    audioElement.setAttribute('playsinline', 'true');
+    audioElement.muted = false;
+    audioElement.id = trackId;
+    
+    // Apply current speaker state
+    audioElement.muted = !isSpeakerEnabled;
+    
+    if (audioContainerRef.current) {
+      audioContainerRef.current.appendChild(audioElement);
+    } else {
+      document.body.appendChild(audioElement);
+    }
+    
+    attachedTracksRef.current.set(trackId, audioElement);
+    
+    // Try to play (may fail if no user interaction yet)
+    audioElement.play().catch(err => {
+      console.warn('Audio autoplay blocked:', err);
+    });
+  }, [isSpeakerEnabled]);
+
+  // Detach audio track
+  const detachAudioTrack = useCallback((track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
+    const trackId = `${participant.identity}-${publication.trackSid}`;
+    
+    const element = attachedTracksRef.current.get(trackId);
+    if (element) {
+      console.log('Detaching audio track:', trackId);
+      track.detach(element);
+      element.remove();
+      attachedTracksRef.current.delete(trackId);
+    }
+  }, []);
+
+  // Update speaker mute state on all attached audio elements
+  const updateSpeakerMuteState = useCallback((muted: boolean) => {
+    attachedTracksRef.current.forEach((element) => {
+      if (element instanceof HTMLAudioElement) {
+        element.muted = muted;
+      }
+    });
+  }, []);
+
   const connect = useCallback(async () => {
     try {
       setStatus('connecting');
@@ -103,7 +180,7 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
       roomRef.current = newRoom;
       setRoom(newRoom);
 
-      // Set up event handlers
+      // Set up event handlers BEFORE connecting
       newRoom.on(RoomEvent.ConnectionStateChanged, (state) => {
         console.log('Connection state:', state);
         if (state === ConnectionState.Connected) {
@@ -115,41 +192,70 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
         }
       });
 
-      newRoom.on(RoomEvent.ParticipantConnected, () => {
+      newRoom.on(RoomEvent.ParticipantConnected, (participant) => {
+        console.log('Participant connected:', participant.identity);
         updateParticipants();
       });
 
-      newRoom.on(RoomEvent.ParticipantDisconnected, () => {
+      newRoom.on(RoomEvent.ParticipantDisconnected, (participant) => {
+        console.log('Participant disconnected:', participant.identity);
         updateParticipants();
         updateScreenTrack();
       });
 
+      // CRITICAL: Manually attach audio tracks for reliable playback
       newRoom.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        console.log('Track subscribed:', track.source);
+        console.log('Track subscribed:', track.kind, track.source, 'from', participant.identity);
+        
+        if (track.kind === Track.Kind.Audio) {
+          attachAudioTrack(track as RemoteTrack, publication as RemoteTrackPublication, participant as RemoteParticipant);
+        }
+        
         updateScreenTrack();
         updateParticipants();
       });
 
-      newRoom.on(RoomEvent.TrackUnsubscribed, () => {
+      newRoom.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+        console.log('Track unsubscribed:', track.kind, 'from', participant.identity);
+        
+        if (track.kind === Track.Kind.Audio) {
+          detachAudioTrack(track as RemoteTrack, publication as RemoteTrackPublication, participant as RemoteParticipant);
+        }
+        
         updateScreenTrack();
         updateParticipants();
       });
 
-      newRoom.on(RoomEvent.TrackPublished, () => {
+      newRoom.on(RoomEvent.TrackPublished, (publication, participant) => {
+        console.log('Track published:', publication.kind, 'by', participant.identity);
         updateScreenTrack();
       });
 
-      newRoom.on(RoomEvent.TrackUnpublished, () => {
+      newRoom.on(RoomEvent.TrackUnpublished, (publication, participant) => {
+        console.log('Track unpublished:', publication.kind, 'by', participant.identity);
         updateScreenTrack();
       });
 
-      newRoom.on(RoomEvent.LocalTrackPublished, () => {
+      newRoom.on(RoomEvent.LocalTrackPublished, (publication) => {
+        console.log('Local track published:', publication.kind);
         updateScreenTrack();
         updateParticipants();
       });
 
-      newRoom.on(RoomEvent.LocalTrackUnpublished, () => {
+      newRoom.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+        console.log('Local track unpublished:', publication.kind);
         updateScreenTrack();
+        updateParticipants();
+      });
+
+      // Track mute state changes
+      newRoom.on(RoomEvent.TrackMuted, (publication, participant) => {
+        console.log('Track muted:', publication.kind, 'by', participant.identity);
+        updateParticipants();
+      });
+
+      newRoom.on(RoomEvent.TrackUnmuted, (publication, participant) => {
+        console.log('Track unmuted:', publication.kind, 'by', participant.identity);
         updateParticipants();
       });
 
@@ -157,19 +263,41 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
       await newRoom.connect(livekitUrl, tokenData.token);
       console.log('Connected to room:', roomId);
 
+      // CRITICAL: Enable microphone immediately after connecting
+      // This ensures audio publishing works from the start
+      try {
+        await newRoom.localParticipant.setMicrophoneEnabled(true);
+        setIsMicEnabled(true);
+        console.log('Microphone enabled after connect');
+      } catch (micErr) {
+        console.warn('Could not enable microphone:', micErr);
+        // Don't fail the connection if mic fails
+      }
+
+      updateParticipants();
+
     } catch (err) {
       console.error('Connection error:', err);
       setError(err instanceof Error ? err.message : 'Connection failed');
       setStatus('error');
     }
-  }, [roomId, role, livekitUrl, updateParticipants, updateScreenTrack]);
+  }, [roomId, role, livekitUrl, updateParticipants, updateScreenTrack, attachAudioTrack, detachAudioTrack]);
 
   const disconnect = useCallback(async () => {
     if (roomRef.current) {
+      // Clean up all attached audio elements
+      attachedTracksRef.current.forEach((element, trackId) => {
+        console.log('Cleaning up audio element:', trackId);
+        element.remove();
+      });
+      attachedTracksRef.current.clear();
+      
       await roomRef.current.disconnect();
       roomRef.current = null;
       setRoom(null);
       setStatus('ended');
+      setIsMicEnabled(false);
+      setIsScreenSharing(false);
     }
   }, []);
 
@@ -209,43 +337,48 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
       const newState = !isMicEnabled;
       await roomRef.current.localParticipant.setMicrophoneEnabled(newState);
       setIsMicEnabled(newState);
+      console.log('Microphone toggled:', newState);
+      updateParticipants();
     } catch (err) {
       console.error('Mic toggle error:', err);
       setError(err instanceof Error ? err.message : 'Failed to toggle microphone');
     }
-  }, [isMicEnabled]);
+  }, [isMicEnabled, updateParticipants]);
 
   const toggleSpeaker = useCallback(() => {
-    setIsSpeakerEnabled(prev => !prev);
+    const newState = !isSpeakerEnabled;
+    setIsSpeakerEnabled(newState);
     
-    // Mute/unmute all audio tracks from remote participants
-    if (roomRef.current) {
-      for (const participant of roomRef.current.remoteParticipants.values()) {
-        for (const pub of participant.audioTrackPublications.values()) {
-          if (pub.track) {
-            pub.track.setMuted(!isSpeakerEnabled);
-          }
-        }
-      }
-    }
-  }, [isSpeakerEnabled]);
+    // Mute/unmute all audio elements (not tracks)
+    updateSpeakerMuteState(!newState);
+    console.log('Speaker toggled:', newState);
+  }, [isSpeakerEnabled, updateSpeakerMuteState]);
 
-  const muteParticipant = useCallback(async (participantIdentity: string, muted: boolean) => {
+  // Presenter can mute/unmute remote participants
+  // Note: This mutes locally. To actually disable their mic, you'd need server-side control
+  const muteParticipant = useCallback((participantIdentity: string, muted: boolean) => {
     if (!roomRef.current) return;
     
-    const participant = roomRef.current.remoteParticipants.get(participantIdentity);
-    if (participant) {
-      for (const pub of participant.audioTrackPublications.values()) {
-        if (pub.track) {
-          pub.track.setMuted(muted);
-        }
+    // Find and mute/unmute audio elements for this participant
+    attachedTracksRef.current.forEach((element, trackId) => {
+      if (trackId.startsWith(participantIdentity) && element instanceof HTMLAudioElement) {
+        element.muted = muted;
+        console.log('Muted participant audio:', participantIdentity, muted);
       }
-    }
-  }, []);
+    });
+    
+    updateParticipants();
+  }, [updateParticipants]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      // Clean up audio elements
+      attachedTracksRef.current.forEach((element) => {
+        element.remove();
+      });
+      attachedTracksRef.current.clear();
+      
       if (roomRef.current) {
         roomRef.current.disconnect();
       }

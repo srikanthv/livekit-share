@@ -7,9 +7,12 @@ import {
   Volume2, 
   VolumeX,
   PhoneOff,
-  Settings
+  Settings,
+  RefreshCw,
+  Headphones
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { ConnectionStatus } from '@/hooks/useLiveKitRoom';
 
 interface ControlBarProps {
   role: 'presenter' | 'viewer';
@@ -17,12 +20,15 @@ interface ControlBarProps {
   isSpeakerEnabled: boolean;
   isScreenSharing: boolean;
   isConnected: boolean;
+  status?: ConnectionStatus;
   onToggleMic: () => void;
   onToggleSpeaker: () => void;
   onStartScreenShare?: () => void;
   onStopScreenShare?: () => void;
   onDisconnect: () => void;
   onOpenSettings?: () => void;
+  onRestartAudio?: () => void;
+  onRejoin?: () => void;
   isAdmin?: boolean;
 }
 
@@ -32,14 +38,20 @@ export function ControlBar({
   isSpeakerEnabled,
   isScreenSharing,
   isConnected,
+  status,
   onToggleMic,
   onToggleSpeaker,
   onStartScreenShare,
   onStopScreenShare,
   onDisconnect,
   onOpenSettings,
+  onRestartAudio,
+  onRejoin,
   isAdmin,
 }: ControlBarProps) {
+  const isReconnecting = status === 'reconnecting';
+  const isFailed = status === 'failed' || status === 'error';
+  
   return (
     <div className="flex items-center justify-center gap-3 p-4 bg-card/80 backdrop-blur-sm rounded-2xl border border-border/50">
       {/* Microphone */}
@@ -51,7 +63,7 @@ export function ControlBar({
           isMicEnabled && 'glow-primary'
         )}
         onClick={onToggleMic}
-        disabled={!isConnected}
+        disabled={!isConnected || isReconnecting}
       >
         {isMicEnabled ? (
           <Mic className="w-6 h-6" />
@@ -66,7 +78,7 @@ export function ControlBar({
         size="lg"
         className="rounded-full w-14 h-14"
         onClick={onToggleSpeaker}
-        disabled={!isConnected}
+        disabled={!isConnected || isReconnecting}
       >
         {isSpeakerEnabled ? (
           <Volume2 className="w-6 h-6" />
@@ -85,7 +97,7 @@ export function ControlBar({
             isScreenSharing && 'animate-pulse'
           )}
           onClick={isScreenSharing ? onStopScreenShare : onStartScreenShare}
-          disabled={!isConnected}
+          disabled={!isConnected || isReconnecting}
         >
           {isScreenSharing ? (
             <MonitorOff className="w-6 h-6" />
@@ -95,13 +107,40 @@ export function ControlBar({
         </Button>
       )}
 
+      {/* Restart Audio */}
+      {onRestartAudio && (
+        <Button
+          variant="ghost"
+          size="lg"
+          className="rounded-full w-14 h-14"
+          onClick={onRestartAudio}
+          disabled={!isConnected || isReconnecting}
+          title="Restart Audio"
+        >
+          <Headphones className="w-6 h-6" />
+        </Button>
+      )}
+
+      {/* Rejoin (shows when failed) */}
+      {isFailed && onRejoin && (
+        <Button
+          variant="default"
+          size="lg"
+          className="rounded-full w-14 h-14 glow-primary"
+          onClick={onRejoin}
+          title="Rejoin Meeting"
+        >
+          <RefreshCw className="w-6 h-6" />
+        </Button>
+      )}
+
       {/* Disconnect */}
       <Button
         variant="destructive"
         size="lg"
         className="rounded-full w-14 h-14"
         onClick={onDisconnect}
-        disabled={!isConnected}
+        disabled={!isConnected && !isReconnecting}
       >
         <PhoneOff className="w-6 h-6" />
       </Button>

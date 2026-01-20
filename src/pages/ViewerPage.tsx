@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useLiveKitConfig } from '@/hooks/useLiveKitConfig';
 import { useLiveKitRoom } from '@/hooks/useLiveKitRoom';
@@ -12,8 +12,9 @@ import { Loader2, AlertCircle } from 'lucide-react';
 export default function ViewerPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
+  const [hasUserGesture, setHasUserGesture] = useState(false);
   
-  const { config, loading: configLoading, error: configError } = useLiveKitConfig();
+  const { config, loading: configLoading } = useLiveKitConfig();
   
   const {
     status,
@@ -23,8 +24,11 @@ export default function ViewerPage() {
     screenTrack,
     isMicEnabled,
     isSpeakerEnabled,
+    reconnectAttempts,
     connect,
     disconnect,
+    rejoin,
+    restartAudio,
     toggleMicrophone,
     toggleSpeaker,
   } = useLiveKitRoom({
@@ -33,14 +37,19 @@ export default function ViewerPage() {
     livekitUrl: config?.url || '',
   });
 
-  // Auto-connect when config is ready
+  // Gate connection behind user gesture for autoplay compliance
+  const handleJoin = () => {
+    setHasUserGesture(true);
+    connect();
+  };
+
+  // Auto-connect only after user gesture
   useEffect(() => {
-    if (config?.configured && config.url && roomId && status === 'idle') {
+    if (hasUserGesture && config?.configured && config.url && roomId && status === 'idle') {
       connect();
     }
-  }, [config?.configured, config?.url, roomId, status, connect]);
+  }, [hasUserGesture, config?.configured, config?.url, roomId, status, connect]);
 
-  // Redirect if no roomId
   if (!roomId) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
@@ -58,7 +67,6 @@ export default function ViewerPage() {
     );
   }
 
-  // Show loading
   if (configLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -70,7 +78,6 @@ export default function ViewerPage() {
     );
   }
 
-  // Show error if not configured
   if (!config?.configured) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
@@ -87,26 +94,27 @@ export default function ViewerPage() {
     );
   }
 
-  const isConnected = status === 'waiting' || status === 'live' || status === 'connected';
+  const isConnected = ['waiting', 'live', 'connected', 'publishing', 'reconnecting'].includes(status);
+  const showJoinButton = !hasUserGesture && status === 'idle';
 
   return (
     <div className="min-h-screen p-4 md:p-6">
       <div className="max-w-7xl mx-auto space-y-6">
-        {/* Header */}
         <div>
           <h1 className="text-2xl font-bold">Viewer</h1>
           <p className="text-muted-foreground">Room: {roomId}</p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Main Video */}
           <div className="lg:col-span-3 space-y-4">
             <VideoDisplay 
               track={screenTrack} 
-              status={status} 
+              status={status}
+              reconnectAttempts={reconnectAttempts}
+              onRetry={connect}
+              onRejoin={rejoin}
             />
 
-            {/* Error display */}
             {roomError && (
               <Card className="border-status-error/50 bg-status-error/10">
                 <CardContent className="flex items-center gap-3 py-4">
@@ -116,7 +124,15 @@ export default function ViewerPage() {
               </Card>
             )}
 
-            {/* Controls */}
+            {/* Join button - gates connection behind user gesture */}
+            {showJoinButton && (
+              <div className="flex justify-center">
+                <Button onClick={handleJoin} size="lg" className="glow-primary">
+                  Join Meeting
+                </Button>
+              </div>
+            )}
+
             {isConnected && (
               <div className="flex justify-center">
                 <ControlBar
@@ -125,30 +141,27 @@ export default function ViewerPage() {
                   isSpeakerEnabled={isSpeakerEnabled}
                   isScreenSharing={false}
                   isConnected={isConnected}
+                  status={status}
                   onToggleMic={toggleMicrophone}
                   onToggleSpeaker={toggleSpeaker}
                   onDisconnect={disconnect}
+                  onRestartAudio={restartAudio}
+                  onRejoin={rejoin}
                 />
               </div>
             )}
 
-            {/* Reconnect button if ended */}
             {status === 'ended' && (
               <div className="flex justify-center">
-                <Button onClick={connect} size="lg" className="glow-primary">
+                <Button onClick={handleJoin} size="lg" className="glow-primary">
                   Reconnect
                 </Button>
               </div>
             )}
           </div>
 
-          {/* Sidebar */}
           <div className="space-y-4">
-            <ParticipantList
-              localParticipant={localParticipant}
-              participants={participants}
-              isPresenter={false}
-            />
+            <ParticipantList localParticipant={localParticipant} participants={participants} isPresenter={false} />
           </div>
         </div>
       </div>

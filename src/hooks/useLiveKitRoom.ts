@@ -11,13 +11,34 @@ import {
 } from 'livekit-client';
 import { supabase } from '@/integrations/supabase/client';
 
-export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'waiting' | 'live' | 'ended' | 'error';
+// Extended state machine for enterprise-grade connection handling
+export type ConnectionStatus = 
+  | 'idle' 
+  | 'connecting' 
+  | 'connected' 
+  | 'publishing'
+  | 'waiting' 
+  | 'live' 
+  | 'reconnecting'
+  | 'failed'
+  | 'ended' 
+  | 'error';
 
 interface UseLiveKitRoomProps {
   roomId: string;
   role: 'presenter' | 'viewer';
   livekitUrl: string;
 }
+
+// Session logging helper
+const createLogger = (sessionId: string) => {
+  const log = (group: string, message: string, data?: unknown) => {
+    console.group(`[LiveKit:${sessionId}] ${group}`);
+    console.log(message, data ?? '');
+    console.groupEnd();
+  };
+  return log;
+};
 
 export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps) {
   const [room, setRoom] = useState<Room | null>(null);
@@ -29,10 +50,16 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
   const [isMicEnabled, setIsMicEnabled] = useState(false);
   const [isSpeakerEnabled, setIsSpeakerEnabled] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
   
   const roomRef = useRef<Room | null>(null);
   const audioContainerRef = useRef<HTMLDivElement | null>(null);
   const attachedTracksRef = useRef<Map<string, HTMLMediaElement>>(new Map());
+  const wasScreenSharingRef = useRef(false);
+  const wasMicEnabledRef = useRef(false);
+  const mediaTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const sessionIdRef = useRef(`${Date.now()}`);
+  const log = createLogger(sessionIdRef.current);
 
   // Create a hidden container for audio elements
   useEffect(() => {
@@ -52,13 +79,40 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     };
   }, []);
 
+  // Clear media timeout
+  const clearMediaTimeout = useCallback(() => {
+    if (mediaTimeoutRef.current) {
+      clearTimeout(mediaTimeoutRef.current);
+      mediaTimeoutRef.current = null;
+    }
+  }, []);
+
+  // Self-healing: Start media timeout for viewers
+  const startMediaTimeout = useCallback((timeout = 8000) => {
+    clearMediaTimeout();
+    
+    if (role === 'viewer') {
+      mediaTimeoutRef.current = setTimeout(() => {
+        log('MediaTimeout', 'No media received within timeout, attempting reconnect');
+        setError('Waiting for media... retrying connection');
+        // Trigger auto-reconnect
+        if (roomRef.current) {
+          roomRef.current.disconnect().then(() => {
+            setStatus('idle');
+          });
+        }
+      }, timeout);
+    }
+  }, [role, clearMediaTimeout, log]);
+
   const updateParticipants = useCallback(() => {
     if (roomRef.current) {
       const remotes = Array.from(roomRef.current.remoteParticipants.values());
-      setParticipants([...remotes]); // Create new array to trigger re-render
+      setParticipants([...remotes]);
       setLocalParticipant(roomRef.current.localParticipant);
+      log('Participants', `Updated: ${remotes.length + 1} total`);
     }
-  }, []);
+  }, [log]);
 
   const findScreenTrack = useCallback(() => {
     if (!roomRef.current) return null;
@@ -87,11 +141,13 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     setScreenTrack(track);
     
     if (track) {
+      clearMediaTimeout(); // Cancel timeout since we got media
       setStatus('live');
+      log('ScreenTrack', 'Stream is live');
     } else if (roomRef.current?.state === ConnectionState.Connected) {
       setStatus('waiting');
     }
-  }, [findScreenTrack]);
+  }, [findScreenTrack, clearMediaTimeout, log]);
 
   // Attach audio track manually for proper playback
   const attachAudioTrack = useCallback((track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
@@ -101,11 +157,11 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     
     // Don't attach if already attached
     if (attachedTracksRef.current.has(trackId)) {
-      console.log('Audio track already attached:', trackId);
+      log('AudioTrack', `Already attached: ${trackId}`);
       return;
     }
     
-    console.log('Attaching audio track:', trackId, 'from', participant.identity);
+    log('AudioTrack', `Attaching: ${trackId} from ${participant.identity}`);
     
     const audioElement = track.attach() as HTMLAudioElement;
     audioElement.autoplay = true;
@@ -124,11 +180,14 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     
     attachedTracksRef.current.set(trackId, audioElement);
     
+    // Clear media timeout - we got audio
+    clearMediaTimeout();
+    
     // Try to play (may fail if no user interaction yet)
     audioElement.play().catch(err => {
-      console.warn('Audio autoplay blocked:', err);
+      log('AudioTrack', `Autoplay blocked: ${err.message}`);
     });
-  }, [isSpeakerEnabled]);
+  }, [isSpeakerEnabled, clearMediaTimeout, log]);
 
   // Detach audio track
   const detachAudioTrack = useCallback((track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
@@ -136,12 +195,12 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     
     const element = attachedTracksRef.current.get(trackId);
     if (element) {
-      console.log('Detaching audio track:', trackId);
+      log('AudioTrack', `Detaching: ${trackId}`);
       track.detach(element);
       element.remove();
       attachedTracksRef.current.delete(trackId);
     }
-  }, []);
+  }, [log]);
 
   // Update speaker mute state on all attached audio elements
   const updateSpeakerMuteState = useCallback((muted: boolean) => {
@@ -152,10 +211,63 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     });
   }, []);
 
+  // Rehydrate media after reconnect
+  const rehydrateMedia = useCallback(async () => {
+    if (!roomRef.current) return;
+    
+    log('Rehydrate', 'Restoring media state after reconnect');
+    
+    try {
+      // Always restore microphone
+      if (wasMicEnabledRef.current) {
+        await roomRef.current.localParticipant.setMicrophoneEnabled(true);
+        setIsMicEnabled(true);
+        log('Rehydrate', 'Microphone restored');
+      }
+      
+      // Restore screen share for presenter
+      if (role === 'presenter' && wasScreenSharingRef.current) {
+        await roomRef.current.localParticipant.setScreenShareEnabled(true, {
+          audio: true,
+          resolution: { width: 1920, height: 1080 },
+          contentHint: 'detail',
+        });
+        setIsScreenSharing(true);
+        log('Rehydrate', 'Screen share restored');
+      }
+      
+      updateScreenTrack();
+    } catch (err) {
+      log('Rehydrate', `Failed to restore media: ${err}`);
+    }
+  }, [role, updateScreenTrack, log]);
+
+  // Reattach all existing audio tracks
+  const reattachAllAudioTracks = useCallback(() => {
+    if (!roomRef.current) return;
+    
+    log('Reattach', 'Reattaching all audio tracks');
+    
+    for (const participant of roomRef.current.remoteParticipants.values()) {
+      for (const pub of participant.trackPublications.values()) {
+        if (pub.track && pub.track.kind === Track.Kind.Audio) {
+          attachAudioTrack(
+            pub.track as RemoteTrack, 
+            pub as RemoteTrackPublication, 
+            participant
+          );
+        }
+      }
+    }
+  }, [attachAudioTrack, log]);
+
   const connect = useCallback(async () => {
     try {
       setStatus('connecting');
       setError(null);
+      setReconnectAttempts(0);
+      
+      log('Connection', `Starting connection to room: ${roomId}, role: ${role}`);
 
       // Generate token server-side
       const { data: tokenData, error: tokenError } = await supabase.functions.invoke('generate-token', {
@@ -175,37 +287,78 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
             maxFramerate: 30,
           },
         },
+        reconnectPolicy: {
+          // Custom reconnect policy for resilience
+          nextRetryDelayInMs: (context) => {
+            // Exponential backoff: 500ms, 1s, 2s, 4s, max 8s
+            const delay = Math.min(500 * Math.pow(2, context.retryCount), 8000);
+            log('Reconnect', `Retry ${context.retryCount + 1}, delay: ${delay}ms`);
+            return delay;
+          },
+        },
       });
 
       roomRef.current = newRoom;
       setRoom(newRoom);
 
-      // Set up event handlers BEFORE connecting
+      // === STATE MACHINE EVENT HANDLERS ===
+      
+      // Connection state changes
       newRoom.on(RoomEvent.ConnectionStateChanged, (state) => {
-        console.log('Connection state:', state);
-        if (state === ConnectionState.Connected) {
-          setStatus('waiting');
-          updateParticipants();
-          updateScreenTrack();
-        } else if (state === ConnectionState.Disconnected) {
-          setStatus('ended');
+        log('State', `Connection state: ${state}`);
+        
+        switch (state) {
+          case ConnectionState.Connected:
+            setStatus('connected');
+            updateParticipants();
+            updateScreenTrack();
+            break;
+          case ConnectionState.Disconnected:
+            setStatus('ended');
+            clearMediaTimeout();
+            break;
+          case ConnectionState.Reconnecting:
+            setStatus('reconnecting');
+            setReconnectAttempts(prev => prev + 1);
+            break;
         }
       });
 
+      // Reconnected - restore media
+      newRoom.on(RoomEvent.Reconnected, () => {
+        log('State', 'Reconnected successfully');
+        setStatus('connected');
+        rehydrateMedia();
+        reattachAllAudioTracks();
+      });
+
+      // Disconnected with reason
+      newRoom.on(RoomEvent.Disconnected, (reason) => {
+        log('State', `Disconnected: ${reason}`);
+        setStatus('ended');
+        clearMediaTimeout();
+      });
+
+      // Connection quality
+      newRoom.on(RoomEvent.ConnectionQualityChanged, (quality, participant) => {
+        log('Quality', `${participant.identity}: ${quality}`);
+      });
+
+      // Participant events
       newRoom.on(RoomEvent.ParticipantConnected, (participant) => {
-        console.log('Participant connected:', participant.identity);
+        log('Participant', `Connected: ${participant.identity}`);
         updateParticipants();
       });
 
       newRoom.on(RoomEvent.ParticipantDisconnected, (participant) => {
-        console.log('Participant disconnected:', participant.identity);
+        log('Participant', `Disconnected: ${participant.identity}`);
         updateParticipants();
         updateScreenTrack();
       });
 
       // CRITICAL: Manually attach audio tracks for reliable playback
       newRoom.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        console.log('Track subscribed:', track.kind, track.source, 'from', participant.identity);
+        log('Track', `Subscribed: ${track.kind}/${track.source} from ${participant.identity}`);
         
         if (track.kind === Track.Kind.Audio) {
           attachAudioTrack(track as RemoteTrack, publication as RemoteTrackPublication, participant as RemoteParticipant);
@@ -216,7 +369,7 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
       });
 
       newRoom.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
-        console.log('Track unsubscribed:', track.kind, 'from', participant.identity);
+        log('Track', `Unsubscribed: ${track.kind} from ${participant.identity}`);
         
         if (track.kind === Track.Kind.Audio) {
           detachAudioTrack(track as RemoteTrack, publication as RemoteTrackPublication, participant as RemoteParticipant);
@@ -227,70 +380,86 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
       });
 
       newRoom.on(RoomEvent.TrackPublished, (publication, participant) => {
-        console.log('Track published:', publication.kind, 'by', participant.identity);
+        log('Track', `Published: ${publication.kind} by ${participant.identity}`);
         updateScreenTrack();
       });
 
       newRoom.on(RoomEvent.TrackUnpublished, (publication, participant) => {
-        console.log('Track unpublished:', publication.kind, 'by', participant.identity);
+        log('Track', `Unpublished: ${publication.kind} by ${participant.identity}`);
         updateScreenTrack();
       });
 
       newRoom.on(RoomEvent.LocalTrackPublished, (publication) => {
-        console.log('Local track published:', publication.kind);
+        log('Track', `Local published: ${publication.kind}`);
+        setStatus('publishing');
         updateScreenTrack();
         updateParticipants();
       });
 
       newRoom.on(RoomEvent.LocalTrackUnpublished, (publication) => {
-        console.log('Local track unpublished:', publication.kind);
+        log('Track', `Local unpublished: ${publication.kind}`);
         updateScreenTrack();
         updateParticipants();
       });
 
       // Track mute state changes
       newRoom.on(RoomEvent.TrackMuted, (publication, participant) => {
-        console.log('Track muted:', publication.kind, 'by', participant.identity);
+        log('Track', `Muted: ${publication.kind} by ${participant.identity}`);
         updateParticipants();
       });
 
       newRoom.on(RoomEvent.TrackUnmuted, (publication, participant) => {
-        console.log('Track unmuted:', publication.kind, 'by', participant.identity);
+        log('Track', `Unmuted: ${publication.kind} by ${participant.identity}`);
         updateParticipants();
+      });
+
+      // Media device errors
+      newRoom.on(RoomEvent.MediaDevicesError, (error: Error) => {
+        log('Error', `Media device error: ${error.message}`);
+        setError(`Media error: ${error.message}`);
       });
 
       // Connect to room
       await newRoom.connect(livekitUrl, tokenData.token);
-      console.log('Connected to room:', roomId);
+      log('Connection', `Connected to room: ${roomId}`);
 
       // CRITICAL: Enable microphone immediately after connecting
-      // This ensures audio publishing works from the start
+      setStatus('publishing');
       try {
         await newRoom.localParticipant.setMicrophoneEnabled(true);
         setIsMicEnabled(true);
-        console.log('Microphone enabled after connect');
+        wasMicEnabledRef.current = true;
+        log('Mic', 'Microphone enabled after connect');
       } catch (micErr) {
-        console.warn('Could not enable microphone:', micErr);
+        log('Mic', `Could not enable microphone: ${micErr}`);
         // Don't fail the connection if mic fails
       }
 
+      // Start media timeout for viewers
+      startMediaTimeout();
+      
       updateParticipants();
+      setStatus('waiting');
 
     } catch (err) {
-      console.error('Connection error:', err);
-      setError(err instanceof Error ? err.message : 'Connection failed');
-      setStatus('error');
+      const errorMessage = err instanceof Error ? err.message : 'Connection failed';
+      log('Error', `Connection failed: ${errorMessage}`);
+      setError(errorMessage);
+      setStatus('failed');
     }
-  }, [roomId, role, livekitUrl, updateParticipants, updateScreenTrack, attachAudioTrack, detachAudioTrack]);
+  }, [roomId, role, livekitUrl, updateParticipants, updateScreenTrack, attachAudioTrack, detachAudioTrack, rehydrateMedia, reattachAllAudioTracks, clearMediaTimeout, startMediaTimeout, log]);
 
   const disconnect = useCallback(async () => {
     if (roomRef.current) {
+      log('Connection', 'Disconnecting');
+      
       // Clean up all attached audio elements
       attachedTracksRef.current.forEach((element, trackId) => {
-        console.log('Cleaning up audio element:', trackId);
+        log('Cleanup', `Removing audio element: ${trackId}`);
         element.remove();
       });
       attachedTracksRef.current.clear();
+      clearMediaTimeout();
       
       await roomRef.current.disconnect();
       roomRef.current = null;
@@ -298,37 +467,86 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
       setStatus('ended');
       setIsMicEnabled(false);
       setIsScreenSharing(false);
+      wasScreenSharingRef.current = false;
+      wasMicEnabledRef.current = false;
     }
-  }, []);
+  }, [clearMediaTimeout, log]);
+
+  // Manual recovery: Rejoin
+  const rejoin = useCallback(async () => {
+    log('Recovery', 'Manual rejoin triggered');
+    await disconnect();
+    // Small delay to ensure clean state
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await connect();
+  }, [disconnect, connect, log]);
+
+  // Manual recovery: Restart audio only
+  const restartAudio = useCallback(async () => {
+    log('Recovery', 'Restarting audio');
+    
+    if (!roomRef.current) return;
+    
+    try {
+      // Disable and re-enable microphone
+      await roomRef.current.localParticipant.setMicrophoneEnabled(false);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      await roomRef.current.localParticipant.setMicrophoneEnabled(true);
+      setIsMicEnabled(true);
+      wasMicEnabledRef.current = true;
+      
+      // Reattach all audio tracks
+      reattachAllAudioTracks();
+      
+      // Force play all audio elements
+      attachedTracksRef.current.forEach((element) => {
+        if (element instanceof HTMLAudioElement) {
+          element.play().catch(err => {
+            log('Recovery', `Audio play failed: ${err.message}`);
+          });
+        }
+      });
+      
+      log('Recovery', 'Audio restarted successfully');
+    } catch (err) {
+      log('Recovery', `Audio restart failed: ${err}`);
+      setError('Failed to restart audio. Try rejoining.');
+    }
+  }, [reattachAllAudioTracks, log]);
 
   const startScreenShare = useCallback(async () => {
     if (!roomRef.current) return;
     
     try {
+      log('ScreenShare', 'Starting screen share');
       await roomRef.current.localParticipant.setScreenShareEnabled(true, {
         audio: true, // Include system audio
         resolution: { width: 1920, height: 1080 },
         contentHint: 'detail',
       });
       setIsScreenSharing(true);
+      wasScreenSharingRef.current = true;
       updateScreenTrack();
     } catch (err) {
-      console.error('Screen share error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to start screen share');
+      const errorMessage = err instanceof Error ? err.message : 'Failed to start screen share';
+      log('ScreenShare', `Error: ${errorMessage}`);
+      setError(errorMessage);
     }
-  }, [updateScreenTrack]);
+  }, [updateScreenTrack, log]);
 
   const stopScreenShare = useCallback(async () => {
     if (!roomRef.current) return;
     
     try {
+      log('ScreenShare', 'Stopping screen share');
       await roomRef.current.localParticipant.setScreenShareEnabled(false);
       setIsScreenSharing(false);
+      wasScreenSharingRef.current = false;
       updateScreenTrack();
     } catch (err) {
-      console.error('Stop screen share error:', err);
+      log('ScreenShare', `Stop error: ${err}`);
     }
-  }, [updateScreenTrack]);
+  }, [updateScreenTrack, log]);
 
   const toggleMicrophone = useCallback(async () => {
     if (!roomRef.current) return;
@@ -337,13 +555,15 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
       const newState = !isMicEnabled;
       await roomRef.current.localParticipant.setMicrophoneEnabled(newState);
       setIsMicEnabled(newState);
-      console.log('Microphone toggled:', newState);
+      wasMicEnabledRef.current = newState;
+      log('Mic', `Toggled: ${newState}`);
       updateParticipants();
     } catch (err) {
-      console.error('Mic toggle error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to toggle microphone');
+      const errorMessage = err instanceof Error ? err.message : 'Failed to toggle microphone';
+      log('Mic', `Toggle error: ${errorMessage}`);
+      setError(errorMessage);
     }
-  }, [isMicEnabled, updateParticipants]);
+  }, [isMicEnabled, updateParticipants, log]);
 
   const toggleSpeaker = useCallback(() => {
     const newState = !isSpeakerEnabled;
@@ -351,11 +571,10 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     
     // Mute/unmute all audio elements (not tracks)
     updateSpeakerMuteState(!newState);
-    console.log('Speaker toggled:', newState);
-  }, [isSpeakerEnabled, updateSpeakerMuteState]);
+    log('Speaker', `Toggled: ${newState}`);
+  }, [isSpeakerEnabled, updateSpeakerMuteState, log]);
 
-  // Presenter can mute/unmute remote participants
-  // Note: This mutes locally. To actually disable their mic, you'd need server-side control
+  // Presenter can mute/unmute remote participants locally
   const muteParticipant = useCallback((participantIdentity: string, muted: boolean) => {
     if (!roomRef.current) return;
     
@@ -363,16 +582,18 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     attachedTracksRef.current.forEach((element, trackId) => {
       if (trackId.startsWith(participantIdentity) && element instanceof HTMLAudioElement) {
         element.muted = muted;
-        console.log('Muted participant audio:', participantIdentity, muted);
+        log('Mute', `Participant ${participantIdentity}: ${muted}`);
       }
     });
     
     updateParticipants();
-  }, [updateParticipants]);
+  }, [updateParticipants, log]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      clearMediaTimeout();
+      
       // Clean up audio elements
       attachedTracksRef.current.forEach((element) => {
         element.remove();
@@ -383,7 +604,7 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
         roomRef.current.disconnect();
       }
     };
-  }, []);
+  }, [clearMediaTimeout]);
 
   return {
     room,
@@ -395,8 +616,11 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     isMicEnabled,
     isSpeakerEnabled,
     isScreenSharing,
+    reconnectAttempts,
     connect,
     disconnect,
+    rejoin,
+    restartAudio,
     startScreenShare,
     stopScreenShare,
     toggleMicrophone,

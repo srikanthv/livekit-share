@@ -30,8 +30,11 @@ export default function PresenterPage() {
     isMicEnabled,
     isSpeakerEnabled,
     isScreenSharing,
+    reconnectAttempts,
     connect,
     disconnect,
+    rejoin,
+    restartAudio,
     startScreenShare,
     stopScreenShare,
     toggleMicrophone,
@@ -43,7 +46,6 @@ export default function PresenterPage() {
     livekitUrl: config?.url || '',
   });
 
-  // Update URL if roomId is generated
   useEffect(() => {
     if (!searchParams.get('roomId')) {
       navigate(`/presenter?roomId=${roomId}`, { replace: true });
@@ -58,7 +60,6 @@ export default function PresenterPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Show loading
   if (configLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -67,17 +68,15 @@ export default function PresenterPage() {
     );
   }
 
-  // Show setup if not configured
   if (!config?.configured) {
     return <ConfigSetup onSave={saveConfig} loading={configLoading} error={configError} />;
   }
 
-  const isConnected = status === 'waiting' || status === 'live' || status === 'connected';
+  const isConnected = ['waiting', 'live', 'connected', 'publishing', 'reconnecting'].includes(status);
 
   return (
     <div className="min-h-screen p-4 md:p-6">
       <div className="max-w-7xl mx-auto space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold">Presenter View</h1>
@@ -85,39 +84,20 @@ export default function PresenterPage() {
           </div>
           
           <div className="flex items-center gap-3">
-            {/* Viewer Link */}
             <div className="flex items-center gap-2 bg-card/50 border border-border/50 rounded-lg p-2">
               <Link2 className="w-4 h-4 text-muted-foreground" />
-              <Input
-                readOnly
-                value={viewerUrl}
-                className="w-64 h-8 bg-transparent border-0 text-sm"
-              />
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={copyViewerLink}
-                className="h-8"
-              >
-                {copied ? (
-                  <Check className="w-4 h-4 text-status-live" />
-                ) : (
-                  <Copy className="w-4 h-4" />
-                )}
+              <Input readOnly value={viewerUrl} className="w-64 h-8 bg-transparent border-0 text-sm" />
+              <Button variant="ghost" size="sm" onClick={copyViewerLink} className="h-8">
+                {copied ? <Check className="w-4 h-4 text-status-live" /> : <Copy className="w-4 h-4" />}
               </Button>
             </div>
 
-            {/* Settings */}
             <Dialog open={showSettings} onOpenChange={setShowSettings}>
               <DialogTrigger asChild>
-                <Button variant="ghost" size="icon">
-                  <Settings className="w-5 h-5" />
-                </Button>
+                <Button variant="ghost" size="icon"><Settings className="w-5 h-5" /></Button>
               </DialogTrigger>
               <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Edit LiveKit Configuration</DialogTitle>
-                </DialogHeader>
+                <DialogHeader><DialogTitle>Edit LiveKit Configuration</DialogTitle></DialogHeader>
                 <ConfigSetup 
                   onSave={async (url, apiKey, apiSecret) => {
                     const result = await saveConfig(url, apiKey, apiSecret);
@@ -133,39 +113,26 @@ export default function PresenterPage() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Main Video */}
           <div className="lg:col-span-3 space-y-4">
             <VideoDisplay 
               track={screenTrack} 
-              status={status} 
+              status={status}
+              reconnectAttempts={reconnectAttempts}
+              onRetry={connect}
+              onRejoin={rejoin}
             />
 
-            {/* Connect / Controls */}
-            {!isConnected ? (
+            {!isConnected && status !== 'failed' && status !== 'error' ? (
               <Card className="border-border/50 bg-card/50">
                 <CardContent className="flex flex-col items-center py-8">
                   <CardTitle className="text-lg mb-2">Ready to Present?</CardTitle>
                   <CardDescription className="text-center mb-4">
                     Connect to the room and start sharing your screen with viewers.
                   </CardDescription>
-                  <Button 
-                    size="lg" 
-                    onClick={connect}
-                    disabled={status === 'connecting'}
-                    className="glow-primary"
-                  >
-                    {status === 'connecting' ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Connecting...
-                      </>
-                    ) : (
-                      'Start Session'
-                    )}
+                  <Button size="lg" onClick={connect} disabled={status === 'connecting'} className="glow-primary">
+                    {status === 'connecting' ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" />Connecting...</>) : 'Start Session'}
                   </Button>
-                  {roomError && (
-                    <p className="text-destructive text-sm mt-4">{roomError}</p>
-                  )}
+                  {roomError && <p className="text-destructive text-sm mt-4">{roomError}</p>}
                 </CardContent>
               </Card>
             ) : (
@@ -176,24 +143,21 @@ export default function PresenterPage() {
                   isSpeakerEnabled={isSpeakerEnabled}
                   isScreenSharing={isScreenSharing}
                   isConnected={isConnected}
+                  status={status}
                   onToggleMic={toggleMicrophone}
                   onToggleSpeaker={toggleSpeaker}
                   onStartScreenShare={startScreenShare}
                   onStopScreenShare={stopScreenShare}
                   onDisconnect={disconnect}
+                  onRestartAudio={restartAudio}
+                  onRejoin={rejoin}
                 />
               </div>
             )}
           </div>
 
-          {/* Sidebar */}
           <div className="space-y-4">
-            <ParticipantList
-              localParticipant={localParticipant}
-              participants={participants}
-              isPresenter={true}
-              onMuteParticipant={muteParticipant}
-            />
+            <ParticipantList localParticipant={localParticipant} participants={participants} isPresenter={true} onMuteParticipant={muteParticipant} />
           </div>
         </div>
       </div>

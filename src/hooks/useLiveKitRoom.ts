@@ -59,6 +59,8 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
   const wasMicEnabledRef = useRef(false);
   const mediaTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const sessionIdRef = useRef(`${Date.now()}`);
+  // Track if we've ever seen a screen share - prevents reconnect loops while waiting for presenter
+  const hasEverSeenScreenRef = useRef(false);
   const log = createLogger(sessionIdRef.current);
 
   // Create a hidden container for audio elements
@@ -88,13 +90,16 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
   }, []);
 
   // Self-healing: Start media timeout for viewers
+  // ONLY triggers reconnect if we had media before and it disappeared
   const startMediaTimeout = useCallback((timeout = 8000) => {
     clearMediaTimeout();
     
-    if (role === 'viewer') {
+    // Only enable self-healing for viewers who have previously seen a screen share
+    // This prevents reconnect loops when waiting for presenter to start sharing
+    if (role === 'viewer' && hasEverSeenScreenRef.current) {
       mediaTimeoutRef.current = setTimeout(() => {
-        log('MediaTimeout', 'No media received within timeout, attempting reconnect');
-        setError('Waiting for media... retrying connection');
+        log('MediaTimeout', 'Media lost after being live, attempting reconnect');
+        setError('Media lost... retrying connection');
         // Trigger auto-reconnect
         if (roomRef.current) {
           roomRef.current.disconnect().then(() => {
@@ -141,13 +146,23 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
     setScreenTrack(track);
     
     if (track) {
+      // Mark that we've seen a screen share - enables self-healing from now on
+      if (!hasEverSeenScreenRef.current) {
+        hasEverSeenScreenRef.current = true;
+        log('ScreenTrack', 'First screen share detected - self-healing now enabled');
+      }
       clearMediaTimeout(); // Cancel timeout since we got media
       setStatus('live');
       log('ScreenTrack', 'Stream is live');
     } else if (roomRef.current?.state === ConnectionState.Connected) {
+      // Only trigger media timeout if we previously had a screen share (it disappeared unexpectedly)
+      if (hasEverSeenScreenRef.current) {
+        log('ScreenTrack', 'Screen share lost after being live - starting recovery timeout');
+        startMediaTimeout();
+      }
       setStatus('waiting');
     }
-  }, [findScreenTrack, clearMediaTimeout, log]);
+  }, [findScreenTrack, clearMediaTimeout, startMediaTimeout, log]);
 
   // Attach audio track manually for proper playback
   const attachAudioTrack = useCallback((track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
@@ -434,9 +449,10 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
         log('Mic', `Could not enable microphone: ${micErr}`);
         // Don't fail the connection if mic fails
       }
-
-      // Start media timeout for viewers
-      startMediaTimeout();
+      
+      // DO NOT start media timeout here for initial connection
+      // We only start timeout when media was previously seen and then lost
+      // This prevents reconnect loops when viewer joins before presenter starts sharing
       
       updateParticipants();
       setStatus('waiting');
@@ -469,6 +485,8 @@ export function useLiveKitRoom({ roomId, role, livekitUrl }: UseLiveKitRoomProps
       setIsScreenSharing(false);
       wasScreenSharingRef.current = false;
       wasMicEnabledRef.current = false;
+      // Reset the seen screen flag on disconnect so next session starts fresh
+      hasEverSeenScreenRef.current = false;
     }
   }, [clearMediaTimeout, log]);
 

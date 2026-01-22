@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useLiveKitConfig } from '@/hooks/useLiveKitConfig';
 import { useLiveKitRoom } from '@/hooks/useLiveKitRoom';
+import { useLiveKitChat } from '@/hooks/useLiveKitChat';
 import { ConfigSetup } from '@/components/ConfigSetup';
 import { VideoDisplay } from '@/components/VideoDisplay';
 import { ControlBar } from '@/components/ControlBar';
 import { ParticipantList } from '@/components/ParticipantList';
+import { LiveKitChatPanel } from '@/components/LiveKitChatPanel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -40,11 +42,56 @@ export default function PresenterPage() {
     toggleMicrophone,
     toggleSpeaker,
     muteParticipant,
+    room,
   } = useLiveKitRoom({
     roomId,
     role: 'presenter',
     livekitUrl: config?.url || '',
   });
+
+  const localIdentity = localParticipant?.identity || `presenter-${roomId}`;
+  const prevIsScreenSharingRef = useRef(isScreenSharing);
+  const hasJoinedRef = useRef(false);
+  
+  const { 
+    messages, 
+    sendMessage, 
+    sendSystemMessage,
+    addLocalSystemMessage,
+    clearMessages,
+  } = useLiveKitChat({
+    room,
+    localIdentity,
+    role: 'presenter',
+  });
+
+  // Send system messages for screen sharing state changes
+  useEffect(() => {
+    if (prevIsScreenSharingRef.current !== isScreenSharing && status === 'live') {
+      if (isScreenSharing) {
+        sendSystemMessage('Presenter started sharing');
+      } else {
+        sendSystemMessage('Presenter stopped sharing');
+      }
+    }
+    prevIsScreenSharingRef.current = isScreenSharing;
+  }, [isScreenSharing, status, sendSystemMessage]);
+
+  // Send join message when connected (only once per session)
+  useEffect(() => {
+    const isConnectedState = ['connected', 'publishing', 'waiting', 'live'].includes(status);
+    if (isConnectedState && !hasJoinedRef.current && localIdentity) {
+      hasJoinedRef.current = true;
+      const timeout = setTimeout(() => {
+        sendSystemMessage(`${localIdentity} joined the room`);
+      }, 500);
+      return () => clearTimeout(timeout);
+    }
+    if (status === 'ended') {
+      hasJoinedRef.current = false;
+      clearMessages();
+    }
+  }, [status, localIdentity, sendSystemMessage, clearMessages]);
 
   useEffect(() => {
     if (!searchParams.get('roomId')) {
@@ -161,6 +208,15 @@ export default function PresenterPage() {
           </div>
         </div>
       </div>
+      
+      {/* Chat Panel */}
+      {isConnected && (
+        <LiveKitChatPanel
+          messages={messages}
+          onSendMessage={sendMessage}
+          localIdentity={localIdentity}
+        />
+      )}
     </div>
   );
 }

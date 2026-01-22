@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useLiveKitConfig } from '@/hooks/useLiveKitConfig';
 import { useLiveKitRoom } from '@/hooks/useLiveKitRoom';
+import { useLiveKitChat } from '@/hooks/useLiveKitChat';
 import { VideoDisplay } from '@/components/VideoDisplay';
 import { ControlBar } from '@/components/ControlBar';
 import { ParticipantList } from '@/components/ParticipantList';
+import { LiveKitChatPanel } from '@/components/LiveKitChatPanel';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardTitle } from '@/components/ui/card';
 import { Loader2, AlertCircle } from 'lucide-react';
@@ -31,10 +33,25 @@ export default function ViewerPage() {
     restartAudio,
     toggleMicrophone,
     toggleSpeaker,
+    room,
   } = useLiveKitRoom({
     roomId: roomId || '',
     role: 'viewer',
     livekitUrl: config?.url || '',
+  });
+
+  const localIdentity = localParticipant?.identity || `viewer-${Date.now()}`;
+  const hasJoinedRef = useRef(false);
+  
+  const { 
+    messages, 
+    sendMessage, 
+    sendSystemMessage,
+    clearMessages,
+  } = useLiveKitChat({
+    room,
+    localIdentity,
+    role: 'viewer',
   });
 
   // Gate connection behind user gesture for autoplay compliance
@@ -49,6 +66,22 @@ export default function ViewerPage() {
       connect();
     }
   }, [hasUserGesture, config?.configured, config?.url, roomId, status, connect]);
+
+  // Send join message when connected (only once per session)
+  useEffect(() => {
+    const isConnectedState = ['connected', 'publishing', 'waiting', 'live'].includes(status);
+    if (isConnectedState && !hasJoinedRef.current && localIdentity) {
+      hasJoinedRef.current = true;
+      const timeout = setTimeout(() => {
+        sendSystemMessage(`${localIdentity} joined the room`);
+      }, 500);
+      return () => clearTimeout(timeout);
+    }
+    if (status === 'ended') {
+      hasJoinedRef.current = false;
+      clearMessages();
+    }
+  }, [status, localIdentity, sendSystemMessage, clearMessages]);
 
   if (!roomId) {
     return (
@@ -165,6 +198,15 @@ export default function ViewerPage() {
           </div>
         </div>
       </div>
+      
+      {/* Chat Panel */}
+      {isConnected && (
+        <LiveKitChatPanel
+          messages={messages}
+          onSendMessage={sendMessage}
+          localIdentity={localIdentity}
+        />
+      )}
     </div>
   );
 }

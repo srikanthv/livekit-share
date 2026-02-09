@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useLiveKitConfig } from '@/hooks/useLiveKitConfig';
 import { useLiveKitRoom } from '@/hooks/useLiveKitRoom';
 import { useLiveKitChat } from '@/hooks/useLiveKitChat';
+import { usePresenterSignal } from '@/hooks/usePresenterSignal';
 import { ConfigSetup } from '@/components/ConfigSetup';
 import { VideoDisplay } from '@/components/VideoDisplay';
 import { ControlBar } from '@/components/ControlBar';
@@ -11,7 +12,7 @@ import { LiveKitChatPanel } from '@/components/LiveKitChatPanel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Copy, Check, Link2, Loader2, Settings } from 'lucide-react';
+import { Copy, Check, Link2, Loader2, Settings, Radio } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 
 export default function PresenterPage() {
@@ -47,6 +48,15 @@ export default function PresenterPage() {
     roomId,
     role: 'presenter',
     livekitUrl: config?.url || '',
+  });
+
+  const isConnected = ['waiting', 'live', 'connected', 'publishing', 'reconnecting'].includes(status);
+
+  // Broadcast presenter-ready signal to viewers in lobby
+  usePresenterSignal({
+    room,
+    role: 'presenter',
+    isConnected,
   });
 
   const localIdentity = localParticipant?.identity || `presenter-${roomId}`;
@@ -119,15 +129,21 @@ export default function PresenterPage() {
     return <ConfigSetup onSave={saveConfig} loading={configLoading} error={configError} />;
   }
 
-  const isConnected = ['waiting', 'live', 'connected', 'publishing', 'reconnecting'].includes(status);
+  // isConnected is already computed above
 
   return (
     <div className="min-h-screen p-4 md:p-6">
       <div className="max-w-7xl mx-auto space-y-6">
         <div className="flex items-center justify-between">
-          <div>
+          <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold">Presenter View</h1>
-            <p className="text-muted-foreground">Room: {roomId}</p>
+            {isConnected && (
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-status-live/10 text-status-live">
+                <Radio className="w-3 h-3" />
+                <span className="w-1.5 h-1.5 bg-status-live rounded-full animate-pulse" />
+                You are live
+              </span>
+            )}
           </div>
           
           <div className="flex items-center gap-3">

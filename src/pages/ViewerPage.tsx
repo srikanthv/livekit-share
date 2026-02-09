@@ -3,10 +3,12 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useLiveKitConfig } from '@/hooks/useLiveKitConfig';
 import { useLiveKitRoom } from '@/hooks/useLiveKitRoom';
 import { useLiveKitChat } from '@/hooks/useLiveKitChat';
+import { usePresenterSignal } from '@/hooks/usePresenterSignal';
 import { VideoDisplay } from '@/components/VideoDisplay';
 import { ControlBar } from '@/components/ControlBar';
 import { ParticipantList } from '@/components/ParticipantList';
 import { LiveKitChatPanel } from '@/components/LiveKitChatPanel';
+import { ViewerLobby } from '@/components/ViewerLobby';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardTitle } from '@/components/ui/card';
 import { Loader2, AlertCircle } from 'lucide-react';
@@ -38,6 +40,15 @@ export default function ViewerPage() {
     roomId: roomId || '',
     role: 'viewer',
     livekitUrl: config?.url || '',
+  });
+
+  const isConnected = ['waiting', 'live', 'connected', 'publishing', 'reconnecting'].includes(status);
+
+  // Presenter-ready lobby gate
+  const { presenterReady } = usePresenterSignal({
+    room,
+    role: 'viewer',
+    isConnected,
   });
 
   const localIdentity = localParticipant?.identity || `viewer-${Date.now()}`;
@@ -127,8 +138,9 @@ export default function ViewerPage() {
     );
   }
 
-  const isConnected = ['waiting', 'live', 'connected', 'publishing', 'reconnecting'].includes(status);
   const showJoinButton = !hasUserGesture && status === 'idle';
+  const inLobby = isConnected && !presenterReady;
+  const inActiveMeeting = isConnected && presenterReady;
 
   return (
     <div className="min-h-screen p-4 md:p-6">
@@ -138,35 +150,44 @@ export default function ViewerPage() {
           <p className="text-muted-foreground">Room: {roomId}</p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          <div className="lg:col-span-3 space-y-4">
-            <VideoDisplay 
-              track={screenTrack} 
-              status={status}
-              reconnectAttempts={reconnectAttempts}
-              onRetry={connect}
-              onRejoin={rejoin}
-            />
+        {/* Join button - gates connection behind user gesture */}
+        {showJoinButton && (
+          <div className="flex justify-center py-12">
+            <Button onClick={handleJoin} size="lg" className="glow-primary">
+              Join Meeting
+            </Button>
+          </div>
+        )}
 
-            {roomError && (
-              <Card className="border-status-error/50 bg-status-error/10">
-                <CardContent className="flex items-center gap-3 py-4">
-                  <AlertCircle className="w-5 h-5 text-status-error" />
-                  <p className="text-status-error">{roomError}</p>
-                </CardContent>
-              </Card>
-            )}
+        {/* Lobby: connected but waiting for presenter */}
+        {inLobby && (
+          <ViewerLobby
+            participantCount={participants.length}
+            onDisconnect={disconnect}
+          />
+        )}
 
-            {/* Join button - gates connection behind user gesture */}
-            {showJoinButton && (
-              <div className="flex justify-center">
-                <Button onClick={handleJoin} size="lg" className="glow-primary">
-                  Join Meeting
-                </Button>
-              </div>
-            )}
+        {/* Active meeting: presenter is present */}
+        {inActiveMeeting && (
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <div className="lg:col-span-3 space-y-4">
+              <VideoDisplay 
+                track={screenTrack} 
+                status={status}
+                reconnectAttempts={reconnectAttempts}
+                onRetry={connect}
+                onRejoin={rejoin}
+              />
 
-            {isConnected && (
+              {roomError && (
+                <Card className="border-status-error/50 bg-status-error/10">
+                  <CardContent className="flex items-center gap-3 py-4">
+                    <AlertCircle className="w-5 h-5 text-status-error" />
+                    <p className="text-status-error">{roomError}</p>
+                  </CardContent>
+                </Card>
+              )}
+
               <div className="flex justify-center">
                 <ControlBar
                   role="viewer"
@@ -182,24 +203,25 @@ export default function ViewerPage() {
                   onRejoin={rejoin}
                 />
               </div>
-            )}
+            </div>
 
-            {status === 'ended' && (
-              <div className="flex justify-center">
-                <Button onClick={handleJoin} size="lg" className="glow-primary">
-                  Reconnect
-                </Button>
-              </div>
-            )}
+            <div className="space-y-4">
+              <ParticipantList localParticipant={localParticipant} participants={participants} isPresenter={false} />
+            </div>
           </div>
+        )}
 
-          <div className="space-y-4">
-            <ParticipantList localParticipant={localParticipant} participants={participants} isPresenter={false} />
+        {/* Ended state */}
+        {status === 'ended' && (
+          <div className="flex justify-center py-12">
+            <Button onClick={handleJoin} size="lg" className="glow-primary">
+              Reconnect
+            </Button>
           </div>
-        </div>
+        )}
       </div>
       
-      {/* Chat Panel */}
+      {/* Chat Panel - available in lobby and active meeting */}
       {isConnected && (
         <LiveKitChatPanel
           messages={messages}

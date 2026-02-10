@@ -9,14 +9,12 @@ import { ControlBar } from '@/components/ControlBar';
 import { ParticipantList } from '@/components/ParticipantList';
 import { LiveKitChatPanel } from '@/components/LiveKitChatPanel';
 import { ViewerLobby } from '@/components/ViewerLobby';
-import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardTitle } from '@/components/ui/card';
 import { Loader2, AlertCircle } from 'lucide-react';
 
 export default function ViewerPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
-  const [hasUserGesture, setHasUserGesture] = useState(false);
   
   const { config, loading: configLoading } = useLiveKitConfig();
   
@@ -65,18 +63,12 @@ export default function ViewerPage() {
     role: 'viewer',
   });
 
-  // Gate connection behind user gesture for autoplay compliance
-  const handleJoin = () => {
-    setHasUserGesture(true);
-    connect();
-  };
-
-  // Auto-connect only after user gesture
+  // Auto-connect when config is ready — no "Join" button needed
   useEffect(() => {
-    if (hasUserGesture && config?.configured && config.url && roomId && status === 'idle') {
+    if (config?.configured && config.url && roomId && status === 'idle') {
       connect();
     }
-  }, [hasUserGesture, config?.configured, config?.url, roomId, status, connect]);
+  }, [config?.configured, config?.url, roomId, status, connect]);
 
   // Send join message when connected (only once per session)
   useEffect(() => {
@@ -104,7 +96,6 @@ export default function ViewerPage() {
             <CardDescription className="text-center mb-4">
               No room ID was provided. Please use a valid viewer link from the presenter.
             </CardDescription>
-            <Button onClick={() => navigate('/')}>Go Home</Button>
           </CardContent>
         </Card>
       </div>
@@ -138,7 +129,8 @@ export default function ViewerPage() {
     );
   }
 
-  const showJoinButton = !hasUserGesture && status === 'idle';
+  // Show connecting state while auto-joining
+  const isJoining = status === 'connecting' || status === 'idle';
   const inLobby = isConnected && !presenterReady;
   const inActiveMeeting = isConnected && presenterReady;
 
@@ -150,12 +142,13 @@ export default function ViewerPage() {
           <p className="text-muted-foreground">Room: {roomId}</p>
         </div>
 
-        {/* Join button - gates connection behind user gesture */}
-        {showJoinButton && (
+        {/* Auto-joining spinner */}
+        {isJoining && (
           <div className="flex justify-center py-12">
-            <Button onClick={handleJoin} size="lg" className="glow-primary">
-              Join Meeting
-            </Button>
+            <div className="text-center">
+              <Loader2 className="w-10 h-10 text-primary animate-spin mx-auto mb-4" />
+              <p className="text-muted-foreground">Joining meeting…</p>
+            </div>
           </div>
         )}
 
@@ -214,9 +207,15 @@ export default function ViewerPage() {
         {/* Ended state */}
         {status === 'ended' && (
           <div className="flex justify-center py-12">
-            <Button onClick={handleJoin} size="lg" className="glow-primary">
-              Reconnect
-            </Button>
+            <div className="text-center space-y-3">
+              <p className="text-muted-foreground">The meeting has ended.</p>
+              <button
+                onClick={connect}
+                className="text-primary hover:underline text-sm"
+              >
+                Reconnect
+              </button>
+            </div>
           </div>
         )}
       </div>

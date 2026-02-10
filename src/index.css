@@ -124,4 +124,19 @@
   .status-badge {
     @apply px-3 py-1 rounded-full text-sm font-medium;
   }
+
+  @keyframes slide-in {
+    0% {
+      opacity: 0;
+      transform: translateX(-12px);
+    }
+    100% {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .animate-slide-in {
+    animation: slide-in 0.5s ease-out;
+  }
 }

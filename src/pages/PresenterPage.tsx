@@ -12,8 +12,9 @@ import { LiveKitChatPanel } from '@/components/LiveKitChatPanel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Copy, Check, Link2, Loader2, Settings, Radio } from 'lucide-react';
+import { Copy, Check, Link2, Loader2, Settings, Radio, CircleDot } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
 
 export default function PresenterPage() {
   const [searchParams] = useSearchParams();
@@ -129,24 +130,37 @@ export default function PresenterPage() {
     return <ConfigSetup onSave={saveConfig} loading={configLoading} error={configError} />;
   }
 
-  // isConnected is already computed above
+  // Determine meeting state for badge
+  const meetingState = isScreenSharing
+    ? 'live'
+    : isConnected
+      ? 'waiting'
+      : 'idle';
 
   return (
     <div className="min-h-screen p-4 md:p-6">
       <div className="max-w-7xl mx-auto space-y-6">
+        {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">Presenter View</h1>
-            {isConnected && (
+            <h1 className="text-2xl font-bold">Presenter</h1>
+            {meetingState === 'live' && (
               <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-status-live/10 text-status-live">
                 <Radio className="w-3 h-3" />
                 <span className="w-1.5 h-1.5 bg-status-live rounded-full animate-pulse" />
-                You are live
+                Live — Sharing screen
+              </span>
+            )}
+            {meetingState === 'waiting' && (
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-status-waiting/10 text-status-waiting">
+                <CircleDot className="w-3 h-3" />
+                Meeting not started
               </span>
             )}
           </div>
           
           <div className="flex items-center gap-3">
+            {/* Viewer link — always visible once config is set */}
             <div className="flex items-center gap-2 bg-card/50 border border-border/50 rounded-lg p-2">
               <Link2 className="w-4 h-4 text-muted-foreground" />
               <Input readOnly value={viewerUrl} className="w-64 h-8 bg-transparent border-0 text-sm" />
@@ -177,21 +191,17 @@ export default function PresenterPage() {
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           <div className="lg:col-span-3 space-y-4">
-            <VideoDisplay 
-              track={screenTrack} 
-              status={status}
-              reconnectAttempts={reconnectAttempts}
-              onRetry={connect}
-              onRejoin={rejoin}
-            />
-
+            {/* Pre-connect: show the Start Session card */}
             {!isConnected && status !== 'failed' && status !== 'error' ? (
               <Card className="border-border/50 bg-card/50">
-                <CardContent className="flex flex-col items-center py-8">
+                <CardContent className="flex flex-col items-center py-12">
                   <CardTitle className="text-lg mb-2">Ready to Present?</CardTitle>
-                  <CardDescription className="text-center mb-4">
+                  <CardDescription className="text-center mb-2 max-w-sm">
                     Connect to the room and start sharing your screen with viewers.
                   </CardDescription>
+                  <p className="text-muted-foreground text-xs mb-6">
+                    Anyone with the meeting link can join.
+                  </p>
                   <Button size="lg" onClick={connect} disabled={status === 'connecting'} className="glow-primary">
                     {status === 'connecting' ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" />Connecting...</>) : 'Start Session'}
                   </Button>
@@ -199,28 +209,43 @@ export default function PresenterPage() {
                 </CardContent>
               </Card>
             ) : (
-              <div className="flex justify-center">
-                <ControlBar
-                  role="presenter"
-                  isMicEnabled={isMicEnabled}
-                  isSpeakerEnabled={isSpeakerEnabled}
-                  isScreenSharing={isScreenSharing}
-                  isConnected={isConnected}
+              <>
+                <VideoDisplay 
+                  track={screenTrack} 
                   status={status}
-                  onToggleMic={toggleMicrophone}
-                  onToggleSpeaker={toggleSpeaker}
-                  onStartScreenShare={startScreenShare}
-                  onStopScreenShare={stopScreenShare}
-                  onDisconnect={disconnect}
-                  onRestartAudio={restartAudio}
+                  reconnectAttempts={reconnectAttempts}
+                  onRetry={connect}
                   onRejoin={rejoin}
                 />
-              </div>
+
+                <div className="flex justify-center">
+                  <ControlBar
+                    role="presenter"
+                    isMicEnabled={isMicEnabled}
+                    isSpeakerEnabled={isSpeakerEnabled}
+                    isScreenSharing={isScreenSharing}
+                    isConnected={isConnected}
+                    status={status}
+                    onToggleMic={toggleMicrophone}
+                    onToggleSpeaker={toggleSpeaker}
+                    onStartScreenShare={startScreenShare}
+                    onStopScreenShare={stopScreenShare}
+                    onDisconnect={disconnect}
+                    onRestartAudio={restartAudio}
+                    onRejoin={rejoin}
+                  />
+                </div>
+              </>
             )}
           </div>
 
           <div className="space-y-4">
-            <ParticipantList localParticipant={localParticipant} participants={participants} isPresenter={true} onMuteParticipant={muteParticipant} />
+            <ParticipantList
+              localParticipant={localParticipant}
+              participants={participants}
+              isPresenter={true}
+              onMuteParticipant={muteParticipant}
+            />
           </div>
         </div>
       </div>
